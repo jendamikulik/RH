@@ -1,0 +1,217 @@
+/*
+   pnp_solver.HC  ·  Holy‑C rewrite of the “masomlýnek” 3‑SAT solver
+   ----------------------------------------------------------------
+   Modified for infinite-scale testing with spacetime bending.
+*/
+
+#define NUM_CATS 5
+#define IDX_LOVE 4   /* index of "love" in E[] */
+#define IDX_GRAV 1   /* index of "grav" in E[] */
+#define G 6.674e-11  /* gravitational constant (m^3 kg^-1 s^-2) */
+#define C 3.0e8      /* speed of light (m/s) */
+#define R 1.0e26     /* distance for V(r) - observable universe diameter (m) */
+
+/*------------------------------------
+    Simple RNG helpers (Holy‑C)
+------------------------------------*/
+F64 Rand01() { /* uniform ∈ [0,1) */
+    return (F64)RandU32() / 4294967296.0;
+}
+
+F64 RandNorm() /* Box–Muller normal(0,1) */
+{
+    F64 u1 = Rand01();
+    F64 u2 = Rand01();
+    return sqrt(-2.0 * log(u1)) * cos(2.0*PI * u2);
+}
+
+/*------------------------------------
+    Data structures
+------------------------------------*/
+struct Clause {
+    I64 lit[3];   /* each literal ±var (1‑based) */
+};
+
+struct Solver {
+    I64           nVars;
+    I64           nClauses;
+    Clause       *clauses;   /* dynamic array */
+    U8           *assign;    /* Boolean assignment vector */
+    F64           E[NUM_CATS]; /* Energy field: [vac, grav, corr, sym, love] */
+    F64           alpha;
+    F64           zeta;
+    F64           psi;       /* State variable Psi(t) */
+    F64           deltaT;    /* Time step for Psi update */
+    F64           signal;    /* Lambda(SIGNAL) for dissemination */
+};
+
+/*------------------------------------
+    Core helpers
+------------------------------------*/
+U8 EvalClause(Clause *c, U8 *assign)
+{
+    I64 i;
+    for (i=0;i<3;++i) {
+        I64 lit = c->lit[i];
+        I64 idx = ABS(lit) - 1;
+        U8 val = assign[idx];
+        if (lit < 0) val = !val;
+        if (val) return TRUE;
+    }
+    return FALSE;
+}
+
+I64 CountUnsat(Solver *s)
+{
+    I64 i, cnt = 0;
+    for (i=0;i<s->nClauses;++i)
+        if (!EvalClause(&s->clauses[i], s->assign))
+            ++cnt;
+    return cnt;
+}
+
+void UpdateEnergyField(Solver *s)
+{
+    F64 S = 0.0;
+    I64 k;
+    for (k=0;k<NUM_CATS;++k) S += s->E[k];
+    F64 mLove = s->E[IDX_LOVE] / S;
+    F64 delta = s->alpha * (1.0 - mLove);
+    s->E[IDX_LOVE] += delta;
+    for (k=0;k<NUM_CATS;++k) s->E[k] -= delta / NUM_CATS;
+
+    for (k=0;k<NUM_CATS;++k) s->E[k] += s->zeta * RandNorm();
+
+    s->E[IDX_GRAV] += 1.5 * s->zeta * RandNorm();
+
+    for (k=0;k<NUM_CATS;++k)
+        if (s->E[k] < 1e-9) s->E[k] = 1e-9;
+}
+
+void UpdatePsi(Solver *s)
+{
+    F64 f_Ei = s->E[IDX_GRAV] * s->deltaT;
+    F64 gradPsi = 0.01 * RandNorm();
+    s->psi += f_Ei + gradPsi;
+}
+
+F64 CalculateSchwarzschildRadius(F64 energy)
+{
+    F64 mass = energy / (C * C);
+    F64 rs = (2.0 * G * mass) / (C * C);
+    return rs;
+}
+
+F64 CalculateGravitationalPotential(F64 energy)
+{
+    F64 mass = energy / (C * C);
+    F64 V_r = -(G * mass) / R;
+    return V_r;
+}
+
+void UpdateSignal(Solver *s)
+{
+    F64 eta_resonance = 1.2;
+    F64 V_r = CalculateGravitationalPotential(s->E[IDX_GRAV]);
+    s->signal = s->E[IDX_GRAV] * eta_resonance * V_r;
+}
+
+I64 GreedyFlipSweep(Solver *s)
+{
+    I64 bestUnsat = CountUnsat(s);
+    I64 v;
+    for (v=0; v<s->nVars; ++v) {
+        s->assign[v] = !s->assign[v];
+        I64 unsatNow = CountUnsat(s);
+        if (unsatNow < bestUnsat) {
+            bestUnsat = unsatNow;
+        } else {
+            s->assign[v] = !s->assign[v];
+        }
+    }
+    return bestUnsat;
+}
+
+Bool Solve(Solver *s, I64 maxIters, I64 tol)
+{
+    I64 step;
+    for (step=0; step<maxIters; ++step) {
+        I64 unsat = GreedyFlipSweep(s);
+        UpdateEnergyField(s);
+        UpdatePsi(s);
+        UpdateSignal(s);
+
+        if (step % 100 == 0) { /* Reduced logging for simulation */
+            F64 rs = CalculateSchwarzschildRadius(s->E[IDX_GRAV]);
+            Print("Step %lld: unsat=%lld, E[grav]=%.3f, Psi=%.3f, Signal=%.3e, Schwarzschild radius=%.3e m\n",
+                  step+1, unsat, s->E[IDX_GRAV], s->psi, s->signal, rs);
+        }
+
+        if (unsat <= tol) {
+            Print("Solved after %lld steps; unsat=%lld\n", step+1, unsat);
+            return TRUE;
+        }
+    }
+    Print("Gave up after %lld steps; unsat=%lld\n", maxIters, CountUnsat(s));
+    return FALSE;
+}
+
+/*------------------------------------
+    Infinite-scale test instance
+------------------------------------*/
+void TestInfiniteScale()
+{
+    RandSeed(42);
+
+    /* Use smaller values for simulation, then extrapolate */
+    I64 simVars = 1000; /* Simulate with 1000 variables */
+    I64 simClauses = 4300;
+    I64 simIters = 100; /* Simulate 100 iterations */
+
+    Clause *cls = MAlloc(simClauses * sizeof(Clause));
+    I64 i, j;
+    for (i=0; i<simClauses; ++i) {
+        for (j=0; j<3; ++j) {
+            I64 var = 1 + (RandU32() % simVars);
+            I64 sign = (RandU32() % 2) ? 1 : -1;
+            cls[i].lit[j] = sign * var;
+        }
+    }
+
+    Solver s;
+    s.nVars    = simVars;
+    s.nClauses = simClauses;
+    s.clauses  = cls;
+    s.assign   = MAlloc(s.nVars);
+    for (i=0; i<s.nVars; ++i) s.assign[i] = RandU32() & 1;
+
+    for (i=0; i<NUM_CATS; ++i) s.E[i] = 1.0;
+    s.alpha   = 0.25;
+    s.zeta    = 0.10;
+    s.psi     = 0.0;
+    s.deltaT  = 1.0;
+    s.signal  = 0.0;
+
+    Solve(&s, simIters, 0);
+
+    /* Extrapolate to infinite scale */
+    F64 scaleFactor = 1e1000; /* Approximation for 10^(10^1000) */
+    F64 nVars = scaleFactor + 25;
+    F64 maxIters = scaleFactor + 25;
+    F64 energyScale = scaleFactor + 25;
+
+    F64 deltaE_perIter = 1.5 * s.zeta; /* Average ΔE[grav] per iteration */
+    F64 totalE = s.E[IDX_GRAV] + (deltaE_perIter * (maxIters - simIters));
+    totalE *= energyScale;
+
+    s.E[IDX_GRAV] = totalE;
+    UpdateSignal(&s);
+    F64 rs = CalculateSchwarzschildRadius(s.E[IDX_GRAV]);
+
+    Print("Extrapolated E[grav]: %.3e J\n", s.E[IDX_GRAV]);
+    Print("Extrapolated Signal: %.3e\n", s.signal);
+    Print("Extrapolated Schwarzschild radius: %.3e m\n", rs);
+
+    Free(s.clauses);
+    Free(s.assign);
+}
